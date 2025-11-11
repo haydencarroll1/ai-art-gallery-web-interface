@@ -1,0 +1,16 @@
+# Copy this file to .dev.vars and fill in your actual values
+# This file is for LOCAL DEVELOPMENT ONLY
+
+# Example environment variables for local development
+# Copy this to .dev.vars and fill in real values
+
+# API Authentication (keep secret!)
+DEMO_API_KEY=your-secret-api-key-here
+
+# Optional: For rate limiting (free tier at console.upstash.com)
+UPSTASH_REDIS_REST_URL=https://your-db.upstash.io
+UPSTASH_REDIS_REST_TOKEN=your-token-here
+
+# Optional: AI Provider keys (uncomment the one you're using)
+# OPENAI_API_KEY=sk-...
+# STABILITY_API_KEY=sk-...

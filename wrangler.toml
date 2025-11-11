@@ -1,0 +1,17 @@
+name = "ai-gallery"
+main = "src/worker.js"
+compatibility_date = "2025-11-11"
+
+# R2 bucket binding
+[[r2_buckets]]
+binding = "ART"
+bucket_name = "ai-gallery-art"
+
+[[kv_namespaces]]
+binding = "SPEND_TRACKER"
+id = "b4c0fb4934614b398440cdf0fbcca644"
+
+# Environment variables (add these via: wrangler secret put VARIABLE_NAME)
+# DEMO_API_KEY - Your API key for authentication
+# UPSTASH_REDIS_REST_URL - Your Upstash Redis URL (optional, for rate limiting)
+# UPSTASH_REDIS_REST_TOKEN - Your Upstash Redis token (optional, for rate limiting)

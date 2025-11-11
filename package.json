@@ -1,0 +1,16 @@
+{
+  "name": "ai-gallery",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@upstash/ratelimit": "^2.0.3",
+    "@upstash/redis": "^1.34.3"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0"
+  }
+}
