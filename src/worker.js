@@ -18,6 +18,19 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, X-API-Key",
+          "Access-Control-Max-Age": "86400",
+        }
+      });
+    }
+
     // ========================================
     // POST /api/generate → Generate and store image
     // ========================================
@@ -282,6 +295,258 @@ export default {
     }
 
     // ========================================
+    // GET /api/images/latest - Get the latest image
+    // ========================================
+    if (request.method === "GET" && url.pathname === "/api/images/latest") {
+      try {
+        const list = await env.ART.list({ prefix: "art/", limit: 1000 });
+        
+        // Get the most recent non-latest.jpg image
+        const latestImage = list.objects
+          .filter(obj => obj.key !== "art/latest.jpg")
+          .sort((a, b) => new Date(b.uploaded) - new Date(a.uploaded))[0];
+        
+        if (!latestImage) {
+          return new Response(JSON.stringify({ error: "no_images_found" }), {
+            status: 404,
+            headers: { 
+              "content-type": "application/json",
+              "Access-Control-Allow-Origin": "*"
+            }
+          });
+        }
+        
+        return new Response(JSON.stringify({
+          url: `${url.protocol}//${url.host}/${latestImage.key}`,
+          key: latestImage.key,
+          uploaded: latestImage.uploaded.toISOString(),
+          size: latestImage.size
+        }), {
+          status: 200,
+          headers: { 
+            "content-type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: "failed_to_get_latest" }), {
+          status: 500,
+          headers: { 
+            "content-type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        });
+      }
+    }
+
+    // ========================================
+    // GET /api/images - List all generated images
+    // ========================================
+    if (request.method === "GET" && url.pathname === "/api/images") {
+      try {
+        const list = await env.ART.list({ prefix: "art/", limit: 100 });
+        
+        const images = list.objects
+          .filter(obj => obj.key !== "art/latest.jpg")
+          .map(obj => ({
+            url: `${url.protocol}//${url.host}/${obj.key}`,
+            key: obj.key,
+            uploaded: obj.uploaded.toISOString(),
+            size: obj.size
+          }))
+          .sort((a, b) => new Date(b.uploaded) - new Date(a.uploaded));
+        
+        return new Response(JSON.stringify({ 
+          count: images.length,
+          images: images 
+        }), {
+          status: 200,
+          headers: { 
+            "content-type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: "failed_to_list_images" }), {
+          status: 500,
+          headers: { 
+            "content-type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        });
+      }
+    }
+
+    // ========================================
+    // POST /api/generate-sculpture - Generate 3D from IMAGE (2-step process)
+    // ========================================
+    if (request.method === "POST" && url.pathname === "/api/generate-sculpture") {
+      try {
+        // Parse request
+        const body = await request.json();
+        const prompt = body.prompt || "";
+        
+        if (!prompt || prompt.length < 3) {
+          return new Response(JSON.stringify({ 
+            error: "invalid_prompt",
+            message: "Prompt must be at least 3 characters"
+          }), {
+            status: 400,
+            headers: { 
+              "content-type": "application/json",
+              "Access-Control-Allow-Origin": "*"
+            }
+          });
+        }
+        
+        console.log(`Starting 2-step sculpture generation for: "${prompt}"`);
+        const startTime = Date.now();
+        
+        // STEP 1: Generate 2D image from text prompt
+        console.log('Step 1: Generating 2D image...');
+        const imageResponse = await fetch(
+          'https://api.stability.ai/v2beta/stable-image/generate/sd3',
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${env.STABILITY_API_KEY}`,
+              'Accept': 'image/*'
+            },
+            body: (() => {
+              const fd = new FormData();
+              fd.append('prompt', prompt);
+              fd.append('model', 'sd3-large-turbo');
+              fd.append('aspect_ratio', '1:1');
+              fd.append('output_format', 'png');
+              return fd;
+            })()
+          }
+        );
+        
+        if (!imageResponse.ok) {
+          const errorText = await imageResponse.text();
+          throw new Error(`Image generation failed: ${imageResponse.status} - ${errorText}`);
+        }
+        
+        const imageData = await imageResponse.json();
+        const imageBase64 = imageData.artifacts[0].base64;
+        
+        // Convert base64 to binary
+        const imageBinary = atob(imageBase64);
+        const imageBytes = new Uint8Array(imageBinary.length);
+        for (let i = 0; i < imageBinary.length; i++) {
+          imageBytes[i] = imageBinary.charCodeAt(i);
+        }
+        
+        const imageGenTime = Date.now() - startTime;
+        console.log(`Step 1 complete: Image generated in ${imageGenTime}ms`);
+        
+        // STEP 2: Convert image to 3D using Stable Fast 3D
+        console.log('Step 2: Converting image to 3D...');
+        const step2Start = Date.now();
+        
+        // Create form data with the image
+        const formData = new FormData();
+        formData.append('image', new Blob([imageBytes], { type: 'image/png' }), 'input.png');
+        formData.append('texture_resolution', '1024');
+        formData.append('foreground_ratio', '0.85');
+        
+        const sculptureResponse = await fetch(
+          'https://api.stability.ai/v2beta/3d/stable-fast-3d',
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${env.STABILITY_API_KEY}`
+              // Note: Don't set Content-Type, FormData handles it
+            },
+            body: formData
+          }
+        );
+        
+        if (!sculptureResponse.ok) {
+          const errorText = await sculptureResponse.text();
+          throw new Error(`3D generation failed: ${sculptureResponse.status} - ${errorText}`);
+        }
+        
+        // Get GLB data (immediate response!)
+        const glbData = await sculptureResponse.arrayBuffer();
+        const sculptureGenTime = Date.now() - step2Start;
+        console.log(`Step 2 complete: 3D generated in ${sculptureGenTime}ms`);
+        
+        // STEP 3: Store GLB in R2
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `sculpture-${timestamp}.glb`;
+        const key = `sculptures/${filename}`;
+        
+        await env.ART.put(key, glbData, {
+          httpMetadata: {
+            contentType: 'model/gltf-binary',
+            cacheControl: 'public, max-age=31536000, immutable'
+          }
+        });
+        
+        const totalTime = Date.now() - startTime;
+        console.log(`Sculpture complete! Total time: ${totalTime}ms, stored: ${key}`);
+        
+        // STEP 4: Return response
+        const origin = `${url.protocol}//${url.host}`;
+        return new Response(JSON.stringify({
+          url: `${origin}/${key}`,
+          key: key,
+          prompt: prompt,
+          generationTime: Math.round(totalTime / 1000), // seconds
+          size: glbData.byteLength,
+          note: 'Generated from 2D image of prompt (image-to-3D)',
+          timing: {
+            imageGeneration: Math.round(imageGenTime / 1000),
+            sculptureGeneration: Math.round(sculptureGenTime / 1000),
+            total: Math.round(totalTime / 1000)
+          }
+        }), {
+          status: 200,
+          headers: { 
+            'content-type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+        
+      } catch (error) {
+        console.error('Sculpture generation error:', error);
+        return new Response(JSON.stringify({
+          error: 'generation_failed',
+          message: error.message || 'Failed to generate sculpture'
+        }), {
+          status: 500,
+          headers: { 
+            'content-type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+    }
+
+    // ========================================
+    // GET /sculptures/*.glb - Serve sculpture files
+    // ========================================
+    if (request.method === "GET" && url.pathname.startsWith("/sculptures/")) {
+      const key = url.pathname.slice(1); // Remove leading slash
+      const object = await env.ART.get(key);
+      
+      if (!object) {
+        return new Response("Sculpture not found", { status: 404 });
+      }
+      
+      const headers = new Headers();
+      headers.set("content-type", "model/gltf-binary");
+      headers.set("access-control-allow-origin", "*");
+      headers.set("cache-control", "public, max-age=31536000, immutable");
+      object.writeHttpMetadata(headers);
+      headers.set("etag", object.httpEtag);
+      
+      return new Response(object.body, { headers });
+    }
+
+    // ========================================
     // GET /health → Health check endpoint
     // ========================================
     if (request.method === "GET" && url.pathname === "/health") {
@@ -430,6 +695,122 @@ const HTML = `<!doctype html>
       border-radius: 4px;
       color: #60a5fa;
     }
+    
+    /* Sculpture Generation Styles */
+    .sculpture-section {
+      margin-top: 3rem;
+      padding-top: 2rem;
+      border-top: 2px solid #333;
+    }
+    .sculpture-section h2 {
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .generate-btn {
+      width: 100%;
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .status-box {
+      margin-top: 1.5rem;
+      padding: 1.5rem;
+      background: #1a1a1a;
+      border-radius: 8px;
+      border: 1px solid #333;
+      display: none;
+    }
+    .status-box.show {
+      display: block;
+    }
+    .status-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    #sculpture-status-text {
+      font-weight: 600;
+      color: #e0e0e0;
+    }
+    #sculpture-timer {
+      font-family: 'Courier New', monospace;
+      font-size: 1.1rem;
+      color: #60a5fa;
+      font-weight: bold;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 24px;
+      background: #0f0f0f;
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 1rem;
+      border: 1px solid #333;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #667eea, #764ba2);
+      width: 0%;
+      transition: width 0.3s ease;
+      border-radius: 12px;
+    }
+    .status-message {
+      margin: 0;
+      font-size: 0.9rem;
+      color: #888;
+      font-style: italic;
+    }
+    .complete-box {
+      margin-top: 1.5rem;
+      padding: 1.5rem;
+      background: #1e3a2f;
+      border: 1px solid #2d5a45;
+      border-radius: 8px;
+      display: none;
+    }
+    .complete-box.show {
+      display: block;
+    }
+    .complete-box h3 {
+      margin: 0 0 0.5rem 0;
+      color: #4ade80;
+    }
+    .complete-box p {
+      color: #a0d4b8;
+      margin: 0.5rem 0;
+    }
+    .sculpture-info {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+    }
+    .sculpture-info p {
+      margin: 0.5rem 0;
+      color: #a0d4b8;
+    }
+    .sculpture-info code {
+      background: #0f0f0f;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      color: #60a5fa;
+      word-break: break-all;
+    }
+    
+    /* Responsive */
+    @media (max-width: 768px) {
+      .sculpture-section {
+        padding-top: 1rem;
+      }
+      .status-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+      }
+    }
   </style>
 </head>
 <body>
@@ -450,11 +831,41 @@ const HTML = `<!doctype html>
       minlength="3"
       maxlength="500"
     >
-    <button type="submit">Generate</button>
+    <button type="submit">Generate Image</button>
   </form>
 
   <div id="status"></div>
   <img id="preview" alt="Generated artwork" />
+  
+  <!-- 3D Sculpture Generation Section -->
+  <div class="sculpture-section">
+    <h2>🗿 3D Sculpture Generation</h2>
+    
+    <button id="generate-sculpture-btn" class="generate-btn">
+      Generate 3D Sculpture
+    </button>
+    
+    <div id="sculpture-status" class="status-box">
+      <div class="status-header">
+        <span id="sculpture-status-text">Generating sculpture...</span>
+        <span id="sculpture-timer">0s</span>
+      </div>
+      <div class="progress-bar">
+        <div id="sculpture-progress" class="progress-fill"></div>
+      </div>
+      <p id="sculpture-message" class="status-message"></p>
+    </div>
+    
+    <div id="sculpture-complete" class="complete-box">
+      <h3>✅ Sculpture Generated!</h3>
+      <p>Ready to view in Unity gallery</p>
+      <div class="sculpture-info">
+        <p><strong>Key:</strong> <code id="sculpture-key"></code></p>
+        <p><strong>Generation Time:</strong> <span id="sculpture-time"></span> seconds</p>
+        <p><strong>File Size:</strong> <span id="sculpture-size"></span> MB</p>
+      </div>
+    </div>
+  </div>
 
   <script>
     const form = document.getElementById('gen');
@@ -471,6 +882,7 @@ const HTML = `<!doctype html>
       status.className = '';
     }
 
+    // Image Generation
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       
@@ -527,6 +939,113 @@ const HTML = `<!doctype html>
         setTimeout(hideStatus, 8000);
       } finally {
         form.querySelector('button').disabled = false;
+      }
+    });
+
+    // Sculpture Generation
+    let sculptureTimerInterval = null;
+    
+    document.getElementById('generate-sculpture-btn').addEventListener('click', async () => {
+      const prompt = promptInput.value.trim();
+      
+      if (!prompt || prompt.length < 3) {
+        showStatus('✗ Please enter a prompt first (at least 3 characters)!', 'error');
+        setTimeout(hideStatus, 3000);
+        return;
+      }
+      
+      // Disable button
+      const button = document.getElementById('generate-sculpture-btn');
+      button.disabled = true;
+      button.textContent = 'Generating...';
+      
+      // Show status box
+      document.getElementById('sculpture-status').classList.add('show');
+      document.getElementById('sculpture-complete').classList.remove('show');
+      
+      // Reset progress
+      document.getElementById('sculpture-progress').style.width = '0%';
+      document.getElementById('sculpture-status-text').textContent = 'Starting generation...';
+      document.getElementById('sculpture-message').textContent = 'Sending request to AI...';
+      
+      // Clear any existing timer
+      if (sculptureTimerInterval) {
+        clearInterval(sculptureTimerInterval);
+      }
+      
+      // Start timer
+      let startTime = Date.now();
+      sculptureTimerInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        document.getElementById('sculpture-timer').textContent = elapsed + 's';
+        
+        // Update progress bar (estimate: ~15 seconds total)
+        const estimatedProgress = Math.min((elapsed / 15) * 100, 95);
+        document.getElementById('sculpture-progress').style.width = estimatedProgress + '%';
+        
+        // Update messages based on time
+        if (elapsed < 3) {
+          document.getElementById('sculpture-message').textContent = 'Step 1: Generating 2D image from prompt...';
+        } else if (elapsed < 12) {
+          document.getElementById('sculpture-message').textContent = 'Step 2: Converting image to 3D sculpture...';
+        } else {
+          document.getElementById('sculpture-message').textContent = 'Step 3: Finalizing and storing...';
+        }
+      }, 1000);
+      
+      try {
+        // Call API
+        const response = await fetch('/api/generate-sculpture', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ prompt })
+        });
+        
+        const data = await response.json();
+        
+        // Stop timer
+        clearInterval(sculptureTimerInterval);
+        sculptureTimerInterval = null;
+        
+        if (!response.ok || data.error) {
+          throw new Error(data.message || data.error || 'Generation failed');
+        }
+        
+        // Show completion animation
+        document.getElementById('sculpture-progress').style.width = '100%';
+        document.getElementById('sculpture-status-text').textContent = 'Complete!';
+        document.getElementById('sculpture-message').textContent = '✅ Sculpture ready for Unity';
+        
+        setTimeout(() => {
+          document.getElementById('sculpture-status').classList.remove('show');
+          document.getElementById('sculpture-complete').classList.add('show');
+          
+          // Fill in details
+          document.getElementById('sculpture-key').textContent = data.key;
+          document.getElementById('sculpture-time').textContent = data.generationTime;
+          document.getElementById('sculpture-size').textContent = (data.size / 1024 / 1024).toFixed(2);
+        }, 1000);
+        
+      } catch (error) {
+        if (sculptureTimerInterval) {
+          clearInterval(sculptureTimerInterval);
+          sculptureTimerInterval = null;
+        }
+        document.getElementById('sculpture-status-text').textContent = '❌ Generation failed';
+        document.getElementById('sculpture-message').textContent = error.message;
+        document.getElementById('sculpture-progress').style.width = '0%';
+        document.getElementById('sculpture-progress').style.background = 'linear-gradient(90deg, #f87171, #ef4444)';
+        
+        // Reset progress color after 5 seconds
+        setTimeout(() => {
+          document.getElementById('sculpture-progress').style.background = 'linear-gradient(90deg, #667eea, #764ba2)';
+        }, 5000);
+      } finally {
+        // Re-enable button
+        button.disabled = false;
+        button.textContent = 'Generate 3D Sculpture';
       }
     });
   </script>
